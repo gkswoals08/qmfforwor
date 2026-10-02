@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1대1 블랙잭</title>
+  <style>
+    body { font-family: sans-serif; background: #0b6b3a; color: #fff; margin: 0; padding: 20px; text-align: center; }
+    h1, h2 { margin: 8px 0; }
+    input, button { font-size: 16px; padding: 8px 14px; border-radius: 6px; border: none; }
+    button { background: #f5c542; cursor: pointer; font-weight: bold; }
+    button:disabled { background: #888; cursor: not-allowed; }
+    .row { margin: 12px 0; }
+    .hand { display: flex; gap: 6px; justify-content: center; margin: 8px 0; min-height: 70px; }
+    .card { background: #fff; color: #111; width: 46px; height: 66px; border-radius: 6px;
+            display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; }
+    .card.red { color: #d22; }
+    .card.back { background: #264; color: #8c8; border: 2px solid #8c8; }
+    #players { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin: 16px 0; }
+    .player { background: rgba(0,0,0,.25); border-radius: 10px; padding: 10px 16px; min-width: 150px; border: 3px solid transparent; }
+    .player.turn { border-color: #f5c542; }
+    .player.me { background: rgba(0,0,0,.45); }
+    #controls { display: flex; gap: 10px; justify-content: center; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div id="login">
+    <h1>🃏 1대1 블랙잭</h1>
+    <div class="row"><input id="name" placeholder="닉네임" maxlength="12"></div>
+    <div class="row"><button id="createBtn">방 만들기</button></div>
+    <div class="row">
+      <input id="code" placeholder="친구의 방 코드">
+      <button id="joinBtn">참가</button>
+    </div>
+  </div>
+
+  <div id="game" hidden>
+    <p id="roomInfo"></p>
+    <h2>딜러 <span id="dealerVal"></span></h2>
+    <div id="dealer" class="hand"></div>
+    <div id="players"></div>
+    <div id="controls">
+      <button id="startBtn">라운드 시작</button>
+      <button id="hitBtn" disabled>Hit</button>
+      <button id="standBtn" disabled>Stand</button>
+    </div>
+    <p id="msg"></p>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let peer = null, conn = null, isHost = false, myId = null, myName = '플레이어';
+
+    // ================= 게임 로직 (방장 브라우저에서만 실행) =================
+    function newDeck() {
+      const suits = ['♠', '♥', '♦', '♣'];
+      const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+      const deck = [];
+      for (const suit of suits) for (const rank of ranks) deck.push({ rank, suit });
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
+      return deck;
+    }
+
+    function handValue(hand) {
+      let total = 0, aces = 0;
+      for (const c of hand) {
+        if (c.rank === 'A') { aces++; total += 11; }
+        else if (['J', 'Q', 'K'].includes(c.rank)) total += 10;
+        else total += Number(c.rank);
+      }
+      while (total > 21 && aces > 0) { total -= 10; aces--; }
+      return total;
+    }
+
+    const game = { phase: 'lobby', deck: [], dealer: [], players: [], turn: -1 };
+    const draw = () => game.deck.pop();
+
+    function addPlayer(id, name) {
+      if (game.players.find((p) => p.id === id)) return;
+      game.players.push({ id, name: String(name).slice(0, 12), hand: [], status: 'waiting', result: '' });
+    }
+
+    function removePlayer(id) {
+      const idx = game.players.findIndex((p) => p.id === id);
+      if (idx === -1) return;
+      game.players.splice(idx, 1);
+      if (game.phase === 'playing') {
+        if (idx < game.turn) game.turn--;
+        else if (idx === game.turn) { game.turn--; advance(); }
+      }
+    }
+
+    function startRound() {
+      if (game.players.length === 0) return;
+      game.deck = newDeck();
+      game.dealer = [draw(), draw()];
+      for (const p of game.players) {
+        p.hand = [draw(), draw()];
+        p.status = handValue(p.hand) === 21 ? 'blackjack' : 'playing';
+        p.result = '';
+      }
+      game.phase = 'playing';
+      game.turn = -1;
+      advance();
+    }
+
+    function advance() {
+      for (let i = game.turn + 1; i < game.players.length; i++) {
+        if (game.players[i].status === 'playing') { game.turn = i; return; }
+      }
+      game.turn = -1;
+      dealerPlay();
+    }
+
+    function dealerPlay() {
+      while (handValue(game.dealer) < 17) game.dealer.push(draw());
+      const dv = handValue(game.dealer);
+      const dealerBJ = game.dealer.length === 2 && dv === 21;
+      for (const p of game.players) {
+        const pv = handValue(p.hand);
+        if (p.status === 'bust') p.result = '패배 (Bust)';
+        else if (p.status === 'blackjack') p.result = dealerBJ ? '무승부' : '블랙잭 승리!';
+        else if (dealerBJ) p.result = '패배';
+        else if (dv > 21 || pv > dv) p.result = '승리';
+        else if (pv === dv) p.result = '무승부';
+        else p.result = '패배';
+      }
+      game.phase = 'result';
+    }
+
+    function publicState() {
+      const hide = game.phase === 'playing';
+      return {
+        phase: game.phase,
+        dealer: game.dealer.map((c, i) => (hide && i === 1 ? null : c)),
+        dealerValue: hide || game.dealer.length === 0 ? null : handValue(game.dealer),
+        players: game.players.map((p, i) => ({
+          id: p.id, name: p.name, hand: p.hand, value: handValue(p.hand),
+          status: p.status, result: p.result,
+          isTurn: game.phase === 'playing' && i === game.turn,
+        })),
+      };
+    }
+
+    function broadcast() {
+      const s = publicState();
+      render(s);
+      if (conn && conn.open) conn.send(s);
+    }
+
+    // 행동 처리: id는 'host' 또는 'guest'
+    function handleAction(id, msg) {
+      if (msg.a === 'join') {
+        addPlayer(id, msg.name || '플레이어');
+      } else if (msg.a === 'start') {
+        if (game.phase !== 'playing') startRound();
+      } else if (msg.a === 'hit' || msg.a === 'stand') {
+        const p = game.players[game.turn];
+        if (game.phase !== 'playing' || !p || p.id !== id) return;
+        if (msg.a === 'hit') {
+          p.hand.push(draw());
+          const v = handValue(p.hand);
+          if (v > 21) p.status = 'bust';
+          else if (v === 21) p.status = 'stand';
+        } else {
+          p.status = 'stand';
+        }
+        if (p.status !== 'playing') advance();
+      }
+      broadcast();
+    }
+
+    // ================= 통신 =================
+    function send(msg) {
+      if (isHost) handleAction('host', msg);
+      else if (conn && conn.open) conn.send(msg);
+    }
+
+    function showGame() {
+      $('login').hidden = true;
+      $('game').hidden = false;
+    }
+
+    function createRoom() {
+      isHost = true;
+      myId = 'host';
+      const code = Math.random().toString(36).slice(2, 6);
+      peer = new Peer('bj-' + code);
+      peer.on('open', (id) => {
+        showGame();
+        $('roomInfo').textContent = '방 코드: ' + id.replace('bj-', '') + '  (친구에게 알려주세요)';
+        addPlayer('host', myName);
+        broadcast();
+      });
+      peer.on('connection', (c) => {
+        if (conn && conn.open) { c.on('open', () => c.close()); return; } // 1대1만 허용
+        conn = c;
+        c.on('data', (msg) => handleAction('guest', msg));
+        c.on('close', () => { removePlayer('guest'); conn = null; broadcast(); });
+      });
+      peer.on('error', (e) => {
+        if (e.type === 'unavailable-id') { peer.destroy(); createRoom(); }
+        else alert('오류: ' + e.type);
+      });
+    }
+
+    function joinRoom() {
+      const code = $('code').value.trim().toLowerCase();
+      if (!code) return;
+      isHost = false;
+      myId = 'guest';
+      peer = new Peer();
+      peer.on('open', () => {
+        conn = peer.connect('bj-' + code, { reliable: true });
+        conn.on('open', () => { showGame(); conn.send({ a: 'join', name: myName }); });
+        conn.on('data', (s) => render(s));
+        conn.on('close', () => { alert('방장이 나갔어요'); location.reload(); });
+      });
+      peer.on('error', () => { alert('방을 찾지 못했어요. 코드를 확인해 주세요.'); location.reload(); });
+    }
+
+    // ================= 화면 =================
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function cardHtml(c) {
+      if (!c) return '<div class="card back">?</div>';
+      const red = c.suit === '♥' || c.suit === '♦';
+      return `<div class="card ${red ? 'red' : ''}">${c.rank}${c.suit}</div>`;
+    }
+
+    function statusText(p) {
+      if (p.result) return p.result;
+      if (p.status === 'playing') return p.isTurn ? '⭐ 차례' : '대기 중';
+      if (p.status === 'stand') return 'Stand';
+      if (p.status === 'bust') return 'Bust!';
+      if (p.status === 'blackjack') return '블랙잭!';
+      return '다음 라운드 참가';
+    }
+
+    function render(s) {
+      $('dealer').innerHTML = s.dealer.map(cardHtml).join('');
+      $('dealerVal').textContent = s.dealerValue || '';
+      $('players').innerHTML = s.players.map((p) => `
+        <div class="player ${p.isTurn ? 'turn' : ''} ${p.id === myId ? 'me' : ''}">
+          <b>${escapeHtml(p.name)}${p.id === myId ? ' (나)' : ''}</b>
+          <span>${p.hand.length ? p.value : ''}</span>
+          <div class="hand">${p.hand.map(cardHtml).join('')}</div>
+          <div>${statusText(p)}</div>
+        </div>`).join('');
+
+      const mine = s.players.find((p) => p.id === myId);
+      const myTurn = !!mine && mine.isTurn;
+      $('hitBtn').disabled = !myTurn;
+      $('standBtn').disabled = !myTurn;
+      $('startBtn').disabled = s.phase === 'playing';
+      $('startBtn').textContent = s.phase === 'result' ? '새 라운드' : '라운드 시작';
+
+      if (s.phase === 'lobby') $('msg').textContent = '두 명이 모이면 라운드 시작을 눌러주세요';
+      else if (s.phase === 'playing') $('msg').textContent = myTurn ? '당신 차례예요!' : '상대를 기다리는 중...';
+      else $('msg').textContent = '라운드 종료! 결과를 확인하세요';
+    }
+
+    $('createBtn').onclick = () => { myName = $('name').value.trim() || '플레이어'; createRoom(); };
+    $('joinBtn').onclick = () => { myName = $('name').value.trim() || '플레이어'; joinRoom(); };
+    $('startBtn').onclick = () => send({ a: 'start' });
+    $('hitBtn').onclick = () => send({ a: 'hit' });
+    $('standBtn').onclick = () => send({ a: 'stand' });
+  </script>
+</body>
+</html>
